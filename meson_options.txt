@@ -1,0 +1,4 @@
+option('sigfm',
+       type: 'feature',
+       value: 'auto',
+       description: 'Build the native-frame SIGFM matcher when OpenCV is available')

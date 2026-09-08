@@ -1,0 +1,144 @@
+diff --git a/meson.build b/meson.build
+index 1778815..5d666be 100644
+--- a/meson.build
++++ b/meson.build
+@@ -141,6 +141,7 @@ drivers_info = {
+     'upeksonly': {},
+     'upekts': {},
+     'goodixmoc': {},
++    'goodix55b4': { 'helper': ['openssl', 'pixman', 'opencv'] },
+     'nb1010': {},
+     'fpcmoc': {},
+     'realtek': {},
+@@ -239,8 +239,18 @@ foreach i : driver_helpers
+     elif i == 'openssl'
+         openssl_dep = dependency('openssl', version: '>= 3.0', required: false)
+         if not openssl_dep.found()
+             error('OpenSSL is required for @0@ and possibly others'.format(driver))
+         endif
+
+         optional_deps += openssl_dep
++    elif i == 'opencv'
++        opencv_dep = dependency('opencv5', required: false)
++        if not opencv_dep.found()
++            opencv_dep = dependency('opencv4', required: false)
++        endif
++        if not opencv_dep.found()
++            error('OpenCV 4 or 5 is required for the Goodix SIGFM matcher')
++        endif
++
++        optional_deps += opencv_dep
+     elif i == 'udev'
+diff --git a/libfprint/meson.build b/libfprint/meson.build
+index 15f83ae..e1dfeca 100644
+--- a/libfprint/meson.build
++++ b/libfprint/meson.build
+@@ -135,6 +135,24 @@ driver_sources = {
+         'drivers/goodixmoc/goodix.c',
+         'drivers/goodixmoc/goodix_proto.c',
+     ),
++    'goodix55b4' : files(
++        'drivers/goodix55b4/goodix55b4.c',
++        'drivers/goodix55b4/goodix_command.c',
++        'drivers/goodix55b4/goodix_protocol.c',
++        'drivers/goodix55b4/goodix_tls.c',
++        'drivers/goodix55b4/goodix_transport.c',
++        'drivers/goodix55b4/goodix_activation.c',
++        'drivers/goodix55b4/goodix_calibration.c',
++        'drivers/goodix55b4/goodix_config.c',
++        'drivers/goodix55b4/goodix_session.c',
++        'drivers/goodix55b4/goodix_frame.c',
++        'drivers/goodix55b4/goodix_image.c',
++        'drivers/goodix55b4/goodix_finger.c',
++        'drivers/goodix55b4/goodix_key.c',
++        'drivers/goodix55b4/goodix_seal.c',
++        'drivers/goodix55b4/goodix_psk.c',
++        'drivers/goodix55b4/goodix_sigfm.cpp',
++    ),
+     'fpcmoc' : files('drivers/fpcmoc/fpc.c'),
+     'realtek' : files('drivers/realtek/realtek.c'),
+     'focaltech_moc' : files('drivers/focaltech_moc/focaltech_moc.c'),
+@@ -148,3 +148,4 @@ helper_sources = {
+     'openssl': files(),
+     'pixman': files(),
++    'opencv': files(),
+     'udev': files(),
+diff --git a/libfprint/fprint-list-udev-hwdb.c b/libfprint/fprint-list-udev-hwdb.c
+index 43377fd..de94dd8 100644
+--- a/libfprint/fprint-list-udev-hwdb.c
++++ b/libfprint/fprint-list-udev-hwdb.c
+@@ -179,7 +179,6 @@ static const FpIdEntry unsupported_devices[] = {
+   { .vid = 0x27c6, .pid = 0x5584 },
+   { .vid = 0x27c6, .pid = 0x55a2 },
+   { .vid = 0x27c6, .pid = 0x55a4 },
+-  { .vid = 0x27c6, .pid = 0x55b4 },
+   { .vid = 0x27c6, .pid = 0x5740 },
+   { .vid = 0x27c6, .pid = 0x581a },
+   { .vid = 0x27c6, .pid = 0x589a },
+diff --git a/libfprint/fpi-image-device.c b/libfprint/fpi-image-device.c
+index 87bdc600..4dc71c40 100644
+--- a/libfprint/fpi-image-device.c
++++ b/libfprint/fpi-image-device.c
+@@ -270,6 +270,12 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+       error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL, "Minutiae detection failed, please retry");
+     }
+
++  if (!error)
++    {
++      GPtrArray *minutiae = fp_image_get_minutiae (image);
++      fp_dbg ("sanitized matcher input: %u minutiae",
++              minutiae != NULL ? minutiae->len : 0);
++    }
+   action = fpi_device_get_current_action (device);
+
+   if (action == FPI_DEVICE_ACTION_CAPTURE)
+@@ -494,6 +500,15 @@ fpi_image_device_image_captured (FpImageDevice *self, FpImage *image)
+   fp_image_device_change_state (self, FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF);
+ }
+
++void
++fpi_image_device_report_await_finger_off (FpImageDevice *self)
++{
++  FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
++
++  g_return_if_fail (priv->state == FPI_IMAGE_DEVICE_STATE_CAPTURE);
++  fp_image_device_change_state (self, FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF);
++}
++
+ /**
+  * fpi_image_device_retry_scan:
+  * @self: a #FpImageDevice imaging fingerprint device
+@@ -517,6 +532,7 @@ fpi_image_device_retry_scan (FpImageDevice *self, FpDeviceRetry retry)
+   g_return_if_fail (priv->state != FPI_IMAGE_DEVICE_STATE_INACTIVE);
+   g_return_if_fail (action == FPI_DEVICE_ACTION_ENROLL ||
++                    action == FPI_DEVICE_ACTION_VERIFY ||
+                     action == FPI_DEVICE_ACTION_IDENTIFY ||
+                     action == FPI_DEVICE_ACTION_CAPTURE);
+
+   error = fpi_device_retry_new (retry);
+@@ -620,12 +636,14 @@ fpi_image_device_activate_complete (FpImageDevice *self, GError *error)
+   g_return_if_fail (priv->active == FALSE);
+   g_return_if_fail (priv->state == FPI_IMAGE_DEVICE_STATE_ACTIVATING);
+   g_return_if_fail (action == FPI_DEVICE_ACTION_ENROLL ||
++                    action == FPI_DEVICE_ACTION_VERIFY ||
+                     action == FPI_DEVICE_ACTION_IDENTIFY ||
+                     action == FPI_DEVICE_ACTION_CAPTURE);
+ 
+   if (error)
+     {
+       g_debug ("Image device activation failed");
++      fp_image_device_change_state (self, FPI_IMAGE_DEVICE_STATE_INACTIVE);
+       fpi_device_action_error (FP_DEVICE (self), error);
+       return;
+     }
+diff --git a/libfprint/fpi-image-device.h b/libfprint/fpi-image-device.h
+index 71472dbb..3ef296ff 100644
+--- a/libfprint/fpi-image-device.h
++++ b/libfprint/fpi-image-device.h
+@@ -135,5 +135,6 @@ void fpi_image_device_report_finger_status (FpImageDevice *self,
+                                             gboolean       present);
+ void fpi_image_device_image_captured (FpImageDevice *self,
+                                       FpImage       *image);
++void fpi_image_device_report_await_finger_off (FpImageDevice *self);
+ void fpi_image_device_retry_scan (FpImageDevice *self,
+                                   FpDeviceRetry  retry);

@@ -1,0 +1,72 @@
+diff --git a/libfprint/fp-device-private.h b/libfprint/fp-device-private.h
+index 1c3702f..98853af 100644
+--- a/libfprint/fp-device-private.h
++++ b/libfprint/fp-device-private.h
+@@ -90,6 +90,7 @@ typedef struct
+   /* Suspend/resume tasks */
+   GTask  *suspend_resume_task;
+   GError *suspend_error;
++  gboolean ignore_late_suspend_resume_complete;
+
+   /* Device temperature model information and state */
+   GSource      *temp_timeout;
+diff --git a/libfprint/fpi-device.c b/libfprint/fpi-device.c
+index 9500b3a..291e4a2 100644
+--- a/libfprint/fpi-device.c
++++ b/libfprint/fpi-device.c
+@@ -769,6 +769,7 @@ void
+ fpi_device_remove (FpDevice *device)
+ {
+   FpDevicePrivate *priv = fp_device_get_instance_private (device);
++  g_autoptr(GTask) suspend_resume_task = NULL;
+
+   g_return_if_fail (FP_IS_DEVICE (device));
+   g_return_if_fail (!priv->is_removed);
+@@ -777,6 +778,19 @@ fpi_device_remove (FpDevice *device)
+
+   g_object_notify (G_OBJECT (device), "removed");
+
++  /* A USB device may disappear after resume has started but before the
++   * driver reports completion. Do not leave that separate power task blocking
++   * close forever; consume the eventual driver completion exactly once. */
++  if (priv->suspend_resume_task)
++    {
++      suspend_resume_task = g_steal_pointer (&priv->suspend_resume_task);
++      priv->ignore_late_suspend_resume_complete = TRUE;
++      g_clear_error (&priv->suspend_error);
++      priv->is_suspended = FALSE;
++      g_task_return_error (suspend_resume_task,
++                           fpi_device_error_new (FP_DEVICE_ERROR_REMOVED));
++    }
++
+   /* If there is a pending action, we wait for it to fail, otherwise we
+    * immediately emit the "removed" signal. */
+   if (priv->current_task)
+@@ -1944,6 +1958,13 @@ fpi_device_suspend_complete (FpDevice *device,
+   FpDevicePrivate *priv = fp_device_get_instance_private (device);
+
+   g_return_if_fail (FP_IS_DEVICE (device));
++  if (!priv->suspend_resume_task &&
++      priv->ignore_late_suspend_resume_complete)
++    {
++      priv->ignore_late_suspend_resume_complete = FALSE;
++      g_clear_error (&error);
++      return;
++    }
+   g_return_if_fail (priv->suspend_resume_task);
+   g_return_if_fail (priv->suspend_error == NULL);
+
+@@ -1995,6 +2016,13 @@ fpi_device_resume_complete (FpDevice *device,
+   FpDevicePrivate *priv = fp_device_get_instance_private (device);
+
+   g_return_if_fail (FP_IS_DEVICE (device));
++  if (!priv->suspend_resume_task &&
++      priv->ignore_late_suspend_resume_complete)
++    {
++      priv->ignore_late_suspend_resume_complete = FALSE;
++      g_clear_error (&error);
++      return;
++    }
+   g_return_if_fail (priv->suspend_resume_task);
+
+   if (!g_log_writer_default_would_drop (G_LOG_LEVEL_DEBUG, G_LOG_DOMAIN))

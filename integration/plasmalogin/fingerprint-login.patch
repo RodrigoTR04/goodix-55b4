@@ -1,0 +1,369 @@
+diff --git a/src/auth/Auth.cpp b/src/auth/Auth.cpp
+index 41dcb16..fe6d22d 100644
+--- a/src/auth/Auth.cpp
++++ b/src/auth/Auth.cpp
+@@ -57,6 +57,7 @@ public:
+     QProcess *child{nullptr};
+     QLocalSocket *socket{nullptr};
+     QString sessionPath{};
++    QString service{};
+     QString user{};
+     bool autologin{false};
+     bool greeter{false};
+@@ -292,6 +293,11 @@ const QString &Auth::session() const
+     return d->sessionPath;
+ }
+ 
++const QString &Auth::service() const
++{
++    return d->service;
++}
++
+ const QString &Auth::user() const
+ {
+     return d->user;
+@@ -354,6 +360,11 @@ void Auth::setSession(const QString &path)
+     }
+ }
+ 
++void Auth::setService(const QString &service)
++{
++    d->service = service;
++}
++
+ void Auth::setVerbose(bool on)
+ {
+     if (on != verbose()) {
+@@ -383,6 +394,9 @@ void Auth::start()
+     if (d->greeter) {
+         args << QStringLiteral("--greeter");
+     }
++    if (!d->service.isEmpty()) {
++        args << QStringLiteral("--service") << d->service;
++    }
+     d->child->start(QStringLiteral("%1/plasmalogin-helper").arg(QStringLiteral(LIBEXEC_INSTALL_DIR)), args);
+ }
+ 
+diff --git a/src/auth/Auth.h b/src/auth/Auth.h
+index 1e97de9..06e842d 100644
+--- a/src/auth/Auth.h
++++ b/src/auth/Auth.h
+@@ -79,6 +79,7 @@ public:
+     bool verbose() const;
+     const QString &user() const;
+     const QString &session() const;
++    const QString &service() const;
+     AuthRequest *request();
+     /**
+      * True if an authentication or session is in progress
+@@ -130,6 +131,7 @@ public:
+      * @param path Path of the session executable to be started
+      */
+     void setSession(const QString &path);
++    void setService(const QString &service);
+ 
+ public Q_SLOTS:
+     /**
+diff --git a/src/common/Messages.h b/src/common/Messages.h
+index 94a0856..376a925 100644
+--- a/src/common/Messages.h
++++ b/src/common/Messages.h
+@@ -24,6 +24,7 @@ namespace PLASMALOGIN
+ enum class GreeterMessages {
+     Connect = 0,
+     Login,
++    FingerprintLogin,
+ };
+ 
+ enum class DaemonMessages {
+diff --git a/src/daemon/Display.cpp b/src/daemon/Display.cpp
+index 92feddb..e658604 100644
+--- a/src/daemon/Display.cpp
++++ b/src/daemon/Display.cpp
+@@ -109,6 +109,7 @@ Display::Display(Seat *parent)
+ 
+     // connect login signal
+     connect(m_socketServer, &SocketServer::login, this, &Display::login);
++    connect(m_socketServer, &SocketServer::fingerprintLogin, this, &Display::fingerprintLogin);
+ 
+     // connect login result signals
+     connect(this, &Display::loginFailed, m_socketServer, &SocketServer::loginFailed);
+@@ -260,7 +261,17 @@ void Display::login(QLocalSocket *socket, const QString &user, const QString &pa
+     startAuth(user, password, session);
+ }
+ 
+-bool Display::startAuth(const QString &user, const QString &password, const Session &session)
++void Display::fingerprintLogin(QLocalSocket *socket, const QString &user, const Session &session)
++{
++    m_socket = socket;
++    if (user == QLatin1String("plasmalogin")) {
++        emit loginFailed(m_socket);
++        return;
++    }
++    startAuth(user, QString(), session, QStringLiteral("plasmalogin-fingerprint"));
++}
++
++bool Display::startAuth(const QString &user, const QString &password, const Session &session, const QString &service)
+ {
+     qDebug() << "start auth" << "user" << session.isValid() << session.exec();
+ 
+@@ -338,6 +349,7 @@ bool Display::startAuth(const QString &user, const QString &password, const Sess
+     env.insert(QStringLiteral("XDG_SESSION_DESKTOP"), session.desktopNames());
+ 
+     m_auth->setUser(user);
++    m_auth->setService(service);
+     if (m_reuseSessionId.isNull()) {
+         m_auth->setSession(session.exec());
+     }
+diff --git a/src/daemon/Display.h b/src/daemon/Display.h
+index bdfa1cd..b37d450 100644
+--- a/src/daemon/Display.h
++++ b/src/daemon/Display.h
+@@ -59,6 +59,7 @@ public slots:
+     void stop();
+ 
+     void login(QLocalSocket *socket, const QString &user, const QString &password, const Session &session);
++    void fingerprintLogin(QLocalSocket *socket, const QString &user, const Session &session);
+     void displayServerStarted();
+ 
+ signals:
+@@ -69,7 +70,7 @@ signals:
+     void loginSucceeded(QLocalSocket *socket);
+ 
+ private:
+-    bool startAuth(const QString &user, const QString &password, const Session &session);
++    bool startAuth(const QString &user, const QString &password, const Session &session, const QString &service = QString());
+ 
+     void startSocketServerAndGreeter();
+     bool handleAutologinFailure();
+diff --git a/src/daemon/SocketServer.cpp b/src/daemon/SocketServer.cpp
+index 7ac0fe5..8dd7df7 100644
+--- a/src/daemon/SocketServer.cpp
++++ b/src/daemon/SocketServer.cpp
+@@ -144,6 +144,13 @@ void SocketServer::readyRead()
+             // emit signal
+             emit login(socket, user, password, session);
+         } break;
++        case GreeterMessages::FingerprintLogin: {
++            qDebug() << "Message received from greeter: FingerprintLogin";
++            QString user;
++            Session session;
++            input >> user >> session;
++            emit fingerprintLogin(socket, user, session);
++        } break;
+         default: {
+             // log message
+             qWarning() << "Unknown message" << message;
+diff --git a/src/daemon/SocketServer.h b/src/daemon/SocketServer.h
+index baba7b5..94fcc46 100644
+--- a/src/daemon/SocketServer.h
++++ b/src/daemon/SocketServer.h
+@@ -51,6 +51,7 @@ public slots:
+ 
+ signals:
+     void login(QLocalSocket *socket, const QString &user, const QString &password, const Session &session);
++    void fingerprintLogin(QLocalSocket *socket, const QString &user, const Session &session);
+     void connected();
+ 
+ private:
+diff --git a/src/frontend/greeter/backend/GreeterProxy.cpp b/src/frontend/greeter/backend/GreeterProxy.cpp
+index 9e824c3..69a1f27 100644
+--- a/src/frontend/greeter/backend/GreeterProxy.cpp
++++ b/src/frontend/greeter/backend/GreeterProxy.cpp
+@@ -61,6 +61,11 @@ void GreeterProxy::login(const QString &user, const QString &password, const PLA
+     SocketWriter(d->socket) << quint32(GreeterMessages::Login) << user << password << static_cast<uint32_t>(sessionType) << sessionFileName;
+ }
+ 
++void GreeterProxy::fingerprintLogin(const QString &user, const PLASMALOGIN::SessionType sessionType, const QString &sessionFileName) const
++{
++    SocketWriter(d->socket) << quint32(GreeterMessages::FingerprintLogin) << user << static_cast<uint32_t>(sessionType) << sessionFileName;
++}
++
+ void GreeterProxy::connected()
+ {
+     // log connection
+diff --git a/src/frontend/greeter/backend/GreeterProxy.h b/src/frontend/greeter/backend/GreeterProxy.h
+index e6c7851..d515df2 100644
+--- a/src/frontend/greeter/backend/GreeterProxy.h
++++ b/src/frontend/greeter/backend/GreeterProxy.h
+@@ -41,6 +41,7 @@ public:
+ 
+ public slots:
+     void login(const QString &user, const QString &password, const PLASMALOGIN::SessionType sessionType, const QString &sessionFileName) const;
++    void fingerprintLogin(const QString &user, const PLASMALOGIN::SessionType sessionType, const QString &sessionFileName) const;
+ 
+ private slots:
+     void connected();
+diff --git a/src/frontend/greeter/backend/Messages.h b/src/frontend/greeter/backend/Messages.h
+index d4d0be1..4107de1 100644
+--- a/src/frontend/greeter/backend/Messages.h
++++ b/src/frontend/greeter/backend/Messages.h
+@@ -24,6 +24,7 @@ namespace PLASMALOGIN
+ enum class GreeterMessages {
+     Connect = 0,
+     Login,
++    FingerprintLogin,
+ };
+ 
+ enum class DaemonMessages {
+diff --git a/src/frontend/greeter/qml/GreeterState.qml b/src/frontend/greeter/qml/GreeterState.qml
+index 68395e9..49398cf 100644
+--- a/src/frontend/greeter/qml/GreeterState.qml
++++ b/src/frontend/greeter/qml/GreeterState.qml
+@@ -147,6 +147,12 @@ Item {
+         PlasmaLogin.Authenticator.login(username, password, sessionType, sessionFileName);
+     }
+ 
++    function handleFingerprintLoginRequest(username, sessionType, sessionFileName) {
++        greeterState.lastLoggedInUser = username;
++        greeterState.lastLoggedInSession = sessionFileName;
++        PlasmaLogin.Authenticator.fingerprintLogin(username, sessionType, sessionFileName);
++    }
++
+     Connections {
+         target: PlasmaLogin.Authenticator
+ 
+diff --git a/src/frontend/greeter/qml/Login.qml b/src/frontend/greeter/qml/Login.qml
+index 5b69e34..53602fa 100644
+--- a/src/frontend/greeter/qml/Login.qml
++++ b/src/frontend/greeter/qml/Login.qml
+@@ -32,6 +32,7 @@ SessionManagementScreen {
+     property real fontSize: Kirigami.Theme.defaultFont.pointSize
+ 
+     signal loginRequest(string username, string password)
++    signal fingerprintLoginRequest(string username)
+ 
+     onUserSelected: {
+         // Don't startLogin() here, because the signal is connected to the
+@@ -77,6 +78,14 @@ SessionManagementScreen {
+         loginRequest(username, password);
+     }
+ 
++    function startFingerprintLogin() {
++        const username = showUsernamePrompt ? userNameInput.text : userList.selectedUser
++        footer.enabled = false
++        mainStack.enabled = false
++        userListComponent.userList.opacity = 0.75
++        fingerprintLoginRequest(username)
++    }
++
+     PlasmaComponents3.TextField {
+         id: userNameInput
+         font.pointSize: fontSize + 1
+@@ -153,6 +162,18 @@ SessionManagementScreen {
+             Keys.onEnterPressed: clicked()
+             Keys.onReturnPressed: clicked()
+         }
++
++        PlasmaComponents3.Button {
++            Accessible.name: i18nd("plasma_login", "Log In with Fingerprint")
++            Layout.preferredHeight: passwordBox.implicitHeight
++            Layout.preferredWidth: Layout.preferredHeight
++            icon.name: "fingerprint"
++            display: QQC2.AbstractButton.IconOnly
++            PlasmaComponents3.ToolTip.text: Accessible.name
++            PlasmaComponents3.ToolTip.visible: hovered
++            PlasmaComponents3.ToolTip.delay: Kirigami.Units.toolTipDelay
++            onClicked: startFingerprintLogin()
++        }
+     }
+ 
+     // Synchronise state
+diff --git a/src/frontend/greeter/qml/Main.qml b/src/frontend/greeter/qml/Main.qml
+index eb5b499..0686ac3 100644
+--- a/src/frontend/greeter/qml/Main.qml
++++ b/src/frontend/greeter/qml/Main.qml
+@@ -212,6 +212,7 @@ Item {
+                     }]
+ 
+                 onLoginRequest: (username, password) => root.handleLoginRequest(username, password, sessionButton.currentSessionType, sessionButton.currentSessionFileName)
++                onFingerprintLoginRequest: username => root.handleFingerprintLoginRequest(username, sessionButton.currentSessionType, sessionButton.currentSessionFileName)
+             }
+ 
+             readonly property real zoomFactor: 1.5
+@@ -310,6 +311,7 @@ Item {
+                 }
+ 
+                 onLoginRequest: (username, password) => root.handleLoginRequest(username, password, sessionButton.currentSessionType, sessionButton.currentSessionFileName)
++                onFingerprintLoginRequest: username => root.handleFingerprintLoginRequest(username, sessionButton.currentSessionType, sessionButton.currentSessionFileName)
+ 
+                 //actionItemsVisible: !inputPanel.keyboardActive
+                 actionItems: [
+@@ -414,6 +416,11 @@ Item {
+         PlasmaLogin.GreeterState.handleLoginRequest(username, password, sessionType, sessionFileName);
+     }
+ 
++    function handleFingerprintLoginRequest(username, sessionType, sessionFileName) {
++        root.notificationMessage = "";
++        PlasmaLogin.GreeterState.handleFingerprintLoginRequest(username, sessionType, sessionFileName);
++    }
++
+     Connections {
+         target: PlasmaLogin.Authenticator
+ 
+diff --git a/src/helper/HelperApp.cpp b/src/helper/HelperApp.cpp
+index 61553d3..b2c9f21 100644
+--- a/src/helper/HelperApp.cpp
++++ b/src/helper/HelperApp.cpp
+@@ -96,6 +96,15 @@ void HelperApp::setUp()
+         m_user = args[pos + 1];
+     }
+ 
++    if ((pos = args.indexOf(QStringLiteral("--service"))) >= 0) {
++        if (pos >= args.length() - 1) {
++            qCritical() << "Missing PAM service";
++            exit(Auth::HELPER_OTHER_ERROR);
++            return;
++        }
++        m_backend->setService(args[pos + 1]);
++    }
++
+     if ((pos = args.indexOf(QStringLiteral("--display-server"))) >= 0) {
+         if (pos >= args.length() - 1) {
+             qCritical() << "This application is not supposed to be executed manually";
+diff --git a/src/helper/backend/PamBackend.cpp b/src/helper/backend/PamBackend.cpp
+index 50f386d..bb197da 100644
+--- a/src/helper/backend/PamBackend.cpp
++++ b/src/helper/backend/PamBackend.cpp
+@@ -213,7 +213,7 @@ bool PamBackend::start(const QString &user)
+ {
+     bool result;
+ 
+-    QString service = QStringLiteral("plasmalogin");
++    QString service = m_service.isEmpty() ? QStringLiteral("plasmalogin") : m_service;
+ 
+     if (user == QStringLiteral("plasmalogin") && m_greeter) {
+         service = QStringLiteral("plasmalogin-greeter");
+@@ -229,6 +229,11 @@ bool PamBackend::start(const QString &user)
+     return result;
+ }
+ 
++void PamBackend::setService(const QString &service)
++{
++    m_service = service;
++}
++
+ bool PamBackend::authenticate()
+ {
+     if (!m_pam->authenticate()) {
+diff --git a/src/helper/backend/PamBackend.h b/src/helper/backend/PamBackend.h
+index e150e76..0a23bc5 100644
+--- a/src/helper/backend/PamBackend.h
++++ b/src/helper/backend/PamBackend.h
+@@ -53,6 +53,7 @@ public:
+     int converse(int n, const struct pam_message **msg, struct pam_response **resp);
+     void setAutologin(bool on = true);
+     void setGreeter(bool on = true);
++    void setService(const QString &service);
+ 
+ public slots:
+     bool start(const QString &user = QString());
+@@ -66,6 +67,7 @@ private:
+     HelperApp *m_app{nullptr};
+     bool m_autologin{false};
+     bool m_greeter{false};
++    QString m_service{};
+     PamData *m_data{nullptr};
+     PamHandle *m_pam{nullptr};
+ };
+

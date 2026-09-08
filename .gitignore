@@ -1,0 +1,25 @@
+# Keep device captures and key material out of the repository.
+captures/
+artifacts/
+*.pcap
+*.pcapng
+*.etl
+*.raw
+*.pgm
+*.bin
+*.key
+*.psk
+*.pem
+*.der
+*.log
+
+# Local workspace guidance. Do not publish.
+AGENTS.md
+
+# Build output.
+build/
+meson-private/
+meson-logs/
+compile_commands.json
+__pycache__/
+*.py[cod]

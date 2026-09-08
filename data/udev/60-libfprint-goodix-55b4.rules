@@ -1,0 +1,4 @@
+# Keep 27c6:55b4 root-owned. fprintd opens the node as the service account.
+# Do not add TAG+="uaccess": that lets a session user run the probe, print OTP,
+# or export the sealed pairing blob.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="27c6", ATTR{idProduct}=="55b4", MODE="0600"
